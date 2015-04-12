@@ -64,8 +64,8 @@ static const uint8_t magic[] = { 'A','d','a' };
 #define MAGICSIZE  sizeof(magic)
 #define HEADERSIZE (MAGICSIZE + 3)
 static uint8_t
-  buffer[HEADERSIZE], // Serial input buffer
-  bytesBuffered = 0;  // Amount of data in buffer
+buffer[HEADERSIZE], // Serial input buffer
+bytesBuffered = 0;  // Amount of data in buffer
 
 // If no serial data is received for a while, the LEDs are shut off
 // automatically.  This avoids the annoying "stuck pixel" look when
@@ -73,56 +73,83 @@ static uint8_t
 static const unsigned long serialTimeout = 15000; // 15 seconds
 static unsigned long       lastByteTime, lastAckTime;
 
+#define RELAIOUT 3
+
+void setupSPI()
+{
+  	SPI.begin();
+	SPI.setBitOrder(MSBFIRST);
+	SPI.setDataMode(SPI_MODE0);
+	SPI.setClockDivider(SPI_CLOCK_DIV8); // 2 MHz
+
+	// Issue dummy byte to "prime" the SPI bus.  This later simplifies
+	// the task of doing useful work during SPI transfers.  Rather than
+	// the usual issue-and-wait-loop, code can instead wait-and-issue --
+	// with other operations occurring between transfers, the wait is
+	// then shortened or eliminated.  The SPSR register is read-only,
+	// so this flag can't be forced -- SOMETHING must be issued.
+	SPDR = 0;
+}
+
+
+void stopSPI()
+{
+  SPI.end();
+  delay(20);
+  digitalWrite(13,LOW); // Switch off relai
+  digitalWrite(11,LOW); // Switch off relai
+
+
+}
+
 void setup() {
-  byte c;
-  int  i, p;
+	byte c;
+	int  i, p;
+	
+	// Relai an
+	pinMode(RELAIOUT, OUTPUT);
+		
+	delay(10);
+	digitalWrite(RELAIOUT, HIGH);
+	
+	delay(1000);
 
-  Serial.begin(115200); // 32u4 will ignore BPS and run full speed
+	Serial.begin(115200); // 32u4 will ignore BPS and run full speed
+	Serial.print("Hello Ada World v3!\n");                 // Send hello world
 
-  // SPI is run at 2 MHz.  LPD8806 can run much faster,
-  // but unshielded wiring is susceptible to interference.
-  // Feel free to experiment with other divider ratios.
-  SPI.begin();
-  SPI.setBitOrder(MSBFIRST);
-  SPI.setDataMode(SPI_MODE0);
-  SPI.setClockDivider(SPI_CLOCK_DIV8); // 2 MHz
+	// SPI is run at 2 MHz.  LPD8806 can run much faster,
+	// but unshielded wiring is susceptible to interference.
+	// Feel free to experiment with other divider ratios.
+        setupSPI();
 
-  // Issue dummy byte to "prime" the SPI bus.  This later simplifies
-  // the task of doing useful work during SPI transfers.  Rather than
-  // the usual issue-and-wait-loop, code can instead wait-and-issue --
-  // with other operations occurring between transfers, the wait is
-  // then shortened or eliminated.  The SPSR register is read-only,
-  // so this flag can't be forced -- SOMETHING must be issued.
-  SPDR = 0;
+	// Issue initial latch to LEDs.  This flushes any undefined data that
+	// may exist on powerup, and prepares the LEDs to receive the first
+	// frame of data.  Actual number of LEDs isn't known yet (this arrives
+	// later in frame header packets), so just latch a large number:
+	latch(10000);
 
-  // Issue initial latch to LEDs.  This flushes any undefined data that
-  // may exist on powerup, and prepares the LEDs to receive the first
-  // frame of data.  Actual number of LEDs isn't known yet (this arrives
-  // later in frame header packets), so just latch a large number:
-  latch(10000);
+	// Issue test pattern to LEDs on startup.  This helps verify that
+	// wiring between the Arduino and LEDs is correct.  Again not knowing
+	// the actual number of LEDs, this writes data for an arbitrarily
+	// large number (10K).  If wiring is correct, LEDs will all light
+	// red, green, blue on startup, then off.  Once you're confident
+	// everything is working end-to-end, it's OK to comment this out and
+	// re-upload the sketch to the Arduino.
+	const uint8_t testColor[]  = { 0x80, 0x80, 0xff, 0x80, 0x80, 0x80 },
+	testOffset[] = { 1, 2, 0, 3 };
+	for(c=0; c<4; c++) {  // for each test sequence color...
+		for(p=0; p<10000; p++) { // for each pixel...
+			for(i=0; i<3; i++) {   // for each R,G,B...
+				while(!(SPSR & _BV(SPIF)));          // Wait for prior byte out
+				SPDR = testColor[testOffset[c] + i]; // Issue next byte
+			}
+		}
+		latch(10000);
+		if(c < 3) delay(250);
+	}
 
-  // Issue test pattern to LEDs on startup.  This helps verify that
-  // wiring between the Arduino and LEDs is correct.  Again not knowing
-  // the actual number of LEDs, this writes data for an arbitrarily
-  // large number (10K).  If wiring is correct, LEDs will all light
-  // red, green, blue on startup, then off.  Once you're confident
-  // everything is working end-to-end, it's OK to comment this out and
-  // re-upload the sketch to the Arduino.
-  const uint8_t testColor[]  = { 0x80, 0x80, 0xff, 0x80, 0x80, 0x80 },
-                testOffset[] = { 1, 2, 0, 3 };
-  for(c=0; c<4; c++) {  // for each test sequence color...
-    for(p=0; p<10000; p++) { // for each pixel...
-      for(i=0; i<3; i++) {   // for each R,G,B...
-        while(!(SPSR & _BV(SPIF)));          // Wait for prior byte out
-        SPDR = testColor[testOffset[c] + i]; // Issue next byte
-      }
-    }
-    latch(10000);
-    if(c < 3) delay(250);
-  }
-
-  Serial.print("Ada\n");                 // Send ACK string to host
-  lastByteTime = lastAckTime = millis(); // Initialize timers
+	Serial.print("Ada\n");                 // Send ACK string to host
+	lastByteTime = lastAckTime = millis(); // Initialize timers
 }
 
 // Program flow is simpler than the WS2801 code.  No need for a state
@@ -138,113 +165,125 @@ void setup() {
 // This is used to shuffle things around later.
 static const uint8_t byteOrder[] = { 2, 0, 1 };
 
+static bool relaioff = false;
+
 void loop() {
-  uint8_t       i, hi, lo, byteNum;
-  int           c;
-  long          nLEDs, remaining;
-  unsigned long t;
+	uint8_t       i, hi, lo, byteNum;
+	int           c;
+	long          nLEDs, remaining;
+	unsigned long t;
 
-  // HEADER-SEEKING BLOCK: locate 'magic word' at start of frame.
+	// HEADER-SEEKING BLOCK: locate 'magic word' at start of frame.
 
-  // If any data in serial buffer, shift it down to starting position.
-  for(i=0; i<bytesBuffered; i++)
-    buffer[i] = buffer[HEADERSIZE - bytesBuffered + i];
+	// If any data in serial buffer, shift it down to starting position.
+	for(i=0; i<bytesBuffered; i++)
+	buffer[i] = buffer[HEADERSIZE - bytesBuffered + i];
 
-  // Read bytes from serial input until there's a full header's worth.
-  while(bytesBuffered < HEADERSIZE) {
-    t = millis();
-    if((c = Serial.read()) >= 0) {    // Data received?
-      buffer[bytesBuffered++] = c;    // Store in buffer
-      lastByteTime = lastAckTime = t; // Reset timeout counters
-    } else {                          // No data, check for timeout...
-      if(timeout(t, 10000) == true) return; // Start over
-    }
-  }
+	// Read bytes from serial input until there's a full header's worth.
+	while(bytesBuffered < HEADERSIZE) {
+		t = millis();
+		if((c = Serial.read()) >= 0) {    // Data received?
+			buffer[bytesBuffered++] = c;    // Store in buffer
+			lastByteTime = lastAckTime = t; // Reset timeout counters
+			} else {                          // No data, check for timeout...
+			if(timeout(t, 10000) == true) return; // Start over
+		}
+	}
 
-  // Have a header's worth of data.  Check for 'magic word' match.
-  for(i=0; i<MAGICSIZE; i++) {
-    if(buffer[i] != magic[i]) {      // No match...
-      if(i == 0) bytesBuffered -= 1; // resume search at next char
-      else       bytesBuffered -= i; // resume at non-matching char
-      return;
-    }
-  }
-
-  // Magic word matches.  Now how about the checksum?
-  hi = buffer[MAGICSIZE];
-  lo = buffer[MAGICSIZE + 1];
-  if(buffer[MAGICSIZE + 2] != (hi ^ lo ^ 0x55)) {
-    bytesBuffered -= MAGICSIZE; // No match, resume after magic word
-    return;
-  }
-
-  // Checksum appears valid.  Get 16-bit LED count, add 1 (nLEDs always > 0)
-  nLEDs = remaining = 256L * (long)hi + (long)lo + 1L;
-  bytesBuffered = 0; // Clear serial buffer
-  byteNum = 0;
-
-  // DATA-FORWARDING BLOCK: move bytes from serial input to SPI output.
-
-  // Unfortunately can't just forward bytes directly.  The data order is
-  // different on LPD8806 (G,R,B), so bytes are buffered in groups of 3
-  // and issued in the revised order.
-
-  while(remaining > 0) { // While more LED data is expected...
-    t = millis();
-    if((c = Serial.read()) >= 0) {    // Successful read?
-      lastByteTime = lastAckTime = t; // Reset timeout counters
-      buffer[byteNum++] = c;          // Store in data buffer
-      if(byteNum == 3) {              // Have a full LED's worth?
-        while(byteNum > 0) {          // Issue data in LPD8806 order...
-          i = 0x80 | (buffer[byteOrder[--byteNum]] >> 1);
-          while(!(SPSR & _BV(SPIF))); // Wait for prior byte out
-          SPDR = i;                   // Issue new byte
+	// Ensure relai is on:
+        if (relaioff) {
+        	digitalWrite(3, HIGH);
+                setupSPI();
+                relaioff=false;
         }
-        remaining--;
-      }
-    } else { // No data, check for timeout...
-      if(timeout(t, nLEDs) == true) return; // Start over
-    }
-  }
 
-  // Normal end of data.  Issue latch, return to header-seeking mode.
-  latch(nLEDs);
+	// Have a header's worth of data.  Check for 'magic word' match.
+	for(i=0; i<MAGICSIZE; i++) {
+		if(buffer[i] != magic[i]) {      // No match...
+			if(i == 0) bytesBuffered -= 1; // resume search at next char
+			else       bytesBuffered -= i; // resume at non-matching char
+			return;
+		}
+	}
+
+	// Magic word matches.  Now how about the checksum?
+	hi = buffer[MAGICSIZE];
+	lo = buffer[MAGICSIZE + 1];
+	if(buffer[MAGICSIZE + 2] != (hi ^ lo ^ 0x55)) {
+		bytesBuffered -= MAGICSIZE; // No match, resume after magic word
+		return;
+	}
+
+	// Checksum appears valid.  Get 16-bit LED count, add 1 (nLEDs always > 0)
+	nLEDs = remaining = 256L * (long)hi + (long)lo + 1L;
+	bytesBuffered = 0; // Clear serial buffer
+	byteNum = 0;
+
+	// DATA-FORWARDING BLOCK: move bytes from serial input to SPI output.
+
+	// Unfortunately can't just forward bytes directly.  The data order is
+	// different on LPD8806 (G,R,B), so bytes are buffered in groups of 3
+	// and issued in the revised order.
+
+	while(remaining > 0) { // While more LED data is expected...
+		t = millis();
+		if((c = Serial.read()) >= 0) {    // Successful read?
+			lastByteTime = lastAckTime = t; // Reset timeout counters
+			buffer[byteNum++] = c;          // Store in data buffer
+			if(byteNum == 3) {              // Have a full LED's worth?
+				while(byteNum > 0) {          // Issue data in LPD8806 order...
+					i = 0x80 | (buffer[byteOrder[--byteNum]] >> 1);
+					while(!(SPSR & _BV(SPIF))); // Wait for prior byte out
+					SPDR = i;                   // Issue new byte
+				}
+				remaining--;
+			}
+			} else { // No data, check for timeout...
+			if(timeout(t, nLEDs) == true) return; // Start over
+		}
+	}
+
+	// Normal end of data.  Issue latch, return to header-seeking mode.
+	latch(nLEDs);
 }
 
 static void latch(int n) {      // Pass # of LEDs
-  n = ((n + 63) / 64) * 3;      // Convert to latch length (bytes)
-  while(n--) {                  // For each latch byte...
-    while(!(SPSR & _BV(SPIF))); // Wait for prior byte out
-    SPDR = 0;                   // Issue next byte
-  }
+	n = ((n + 63) / 64) * 3;      // Convert to latch length (bytes)
+	while(n--) {                  // For each latch byte...
+		while(!(SPSR & _BV(SPIF))); // Wait for prior byte out
+		SPDR = 0;                   // Issue next byte
+	}
 }
 
 // Function is called when no pending serial data is available.
 static boolean timeout(
-  unsigned long t,       // Current time, milliseconds
-  int           nLEDs) { // Number of LEDs
+unsigned long t,       // Current time, milliseconds
+int           nLEDs) { // Number of LEDs
 
-  // If condition persists, send an ACK packet to host once every
-  // second to alert it to our presence.
-  if((t - lastAckTime) > 1000) {
-    Serial.print("Ada\n"); // Send ACK string to host
-    lastAckTime = t;       // Reset counter
-  }
+	// If condition persists, send an ACK packet to host once every
+	// second to alert it to our presence.
+	if((t - lastAckTime) > 1000) {
+		Serial.print("Ada\n"); // Send ACK string to host
+		lastAckTime = t;       // Reset counter
+	}
 
-  // If no data received for an extended time, turn off all LEDs.
-  if((t - lastByteTime) > serialTimeout) {
-    long bytes = nLEDs * 3L;
-    latch(nLEDs);      // Latch any partial/incomplete data in strand
-    while(bytes--) {   // Issue all new data to turn off strand
-      while(!(SPSR & _BV(SPIF))); // Wait for prior byte out
-      SPDR = 0x80;                // Issue next byte (0x80 = LED off)
-    }
-    latch(nLEDs);      // Latch 'all off' data
-    lastByteTime  = t; // Reset counter
-    bytesBuffered = 0; // Clear serial buffer
-    return true;
-  }
+	// If no data received for an extended time, turn off all LEDs.
+	if((t - lastByteTime) > serialTimeout) {
+		long bytes = nLEDs * 3L;
+		latch(nLEDs);      // Latch any partial/incomplete data in strand
+		while(bytes--) {   // Issue all new data to turn off strand
+			while(!(SPSR & _BV(SPIF))); // Wait for prior byte out
+			SPDR = 0x80;                // Issue next byte (0x80 = LED off)
+		}
+		latch(nLEDs);      // Latch 'all off' data
+		lastByteTime  = t; // Reset counter
+		bytesBuffered = 0; // Clear serial buffer
+		Serial.write("Relai aus");
+		digitalWrite(RELAIOUT,LOW); // Switch off relai
+                stopSPI(); // Switch SPI off
+                relaioff = true;
+		return true;
+	}
 
-  return false; // No timeout
+	return false; // No timeout
 }
-
